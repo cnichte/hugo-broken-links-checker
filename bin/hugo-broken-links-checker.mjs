@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * Hugo Broken Link Checker.
- * 
+ * hugo-broken-links-checker
+ *
  * Ist Teil der Hugo-Toolbox aber auch als eigenständiges CLI nutzbar.
  * 
- * @author Carsten Nichte, 2024
- * 
- * Konfiguration über: hugo-broken-links-checker.config.json (oder Datei via --config)
- * Läuft idealerweise gegen `hugo server` zB. http://localhost:1313/ 
+ * - CLI-Wrapper rund um linkinator.
+ * - Konfiguration über: hugo-broken-links-checker.config.json (oder Datei via --config)
+ * - Unterstützt mehrere Jobs
+ * - Läuft idealerweise gegen `hugo server` zB. http://localhost:1313/ 
+ * - Mode: "intern" | "extern" | "all"
+ *
+ * @author Carsten Nichte, 2025
  */
-// bin/hugo-broken-link-checker.mjs
+// bin/hugo-broken-links-checker.mjs
 import { LinkChecker } from "linkinator";
 import { performance } from "perf_hooks";
 import fs from "fs";
@@ -30,14 +33,52 @@ const ARGS = process.argv.slice(2);
 
 let CONFIG_PATH = null;
 let DRY_RUN = false;
+let SELECTED_JOB_NAME = null;
+let OVERRIDE_MODE = null; // "intern" | "extern" | "all"
+
+// positional args für: hugo-toolbox check-links <jobName> <mode> --dry-run
+const positionals = [];
 
 for (let i = 0; i < ARGS.length; i += 1) {
   const arg = ARGS[i];
+
   if (arg === "--config" && ARGS[i + 1]) {
     CONFIG_PATH = path.resolve(ARGS[i + 1]);
     i += 1;
   } else if (arg === "--dry-run" || arg === "-d") {
     DRY_RUN = true;
+  } else if (arg === "--job" && ARGS[i + 1]) {
+    SELECTED_JOB_NAME = ARGS[i + 1];
+    i += 1;
+  } else if (arg === "--mode" && ARGS[i + 1]) {
+    const m = ARGS[i + 1].toLowerCase();
+    if (m === "intern" || m === "extern" || m === "all") {
+      OVERRIDE_MODE = m;
+    } else {
+      console.log(
+        pc.yellow(
+          `⚠️  Ungültiger Mode "${m}". Erlaubt: intern | extern | all – ignoriere Override.`
+        )
+      );
+    }
+    i += 1;
+  } else if (arg.startsWith("-")) {
+    // andere Flags ignorieren wir erstmal
+  } else {
+    // positional (jobName, mode)
+    positionals.push(arg);
+  }
+}
+
+// positional args wie bei sftp-sync interpretieren:
+// hugo-toolbox check-links carsten-local all --dry-run
+if (!SELECTED_JOB_NAME && positionals[0]) {
+  SELECTED_JOB_NAME = positionals[0];
+}
+if (!OVERRIDE_MODE && positionals[1]) {
+  const m = positionals[1].toLowerCase();
+  if (m === "intern" || m === "extern" || m === "all") {
+    OVERRIDE_MODE = m;
   }
 }
 
@@ -50,43 +91,59 @@ if (!CONFIG_PATH) {
 }
 
 // ---------------------------------------------------------
-// Default-Konfiguration + Laden
+// Default-Konfiguration + Laden (entspricht altem BLC_Parameter)
 // ---------------------------------------------------------
 
+const DEFAULT_CHECK_OPTIONS = {
+  path: "",
+  // port: 8673,
+  concurrency: 100,
+  // exakt wie im alten Skript:
+  recurse: true,
+  skip: "www.googleapis.com",
+  format: "json",
+  silent: true,
+  verbosity: "error",
+  timeout: 0,
+  // markdown: true,
+  // serverRoot: './',
+  directoryListing: true,
+  retry: true,
+  retryErrors: true,
+  retryErrorsCount: 3,
+  retryErrorsJitter: 5,
+  userAgent: "Mozilla/4.0 (compatible; MSIE 6.0; MSIE 5.5; Windows NT 5.1)",
+  // linksToSkip: [] // optional später
+};
+
 const DEFAULT_JOB = {
-  scan_source: "http://localhost:1313/",
+  // entspricht BLC_Parameter
+  name: "default",
+  scan_source: "http://localhost:1313/", // z.B. Hugo dev server
   write_to: "data/links_checked/external.json",
-  date_format: "yyyy-MM-dd HH:mm:ss",
+  write_to_prefix: null, // optional, für carsten-local-all.json etc.
+  date_format: "yyyy-MM-dd HH:mm:SSS",
   mode: "extern", // "extern" | "intern" | "all"
-  special_excludes: ["data:image/", "mailto:", "blog:", "troubleshooting:"],
-  checkOptions: {
-    path: "",
-    concurrency: 100,
-    recurse: true,
-    skip: "www.googleapis.com",
-    format: "json",
-    silent: true,
-    verbosity: "error",
-    timeout: 0,
-    directoryListing: true,
-    retry: true,
-    retryErrors: true,
-    retryErrorsCount: 3,
-    retryErrorsJitter: 5,
-    userAgent:
-      "Mozilla/4.0 (compatible; MSIE 6.0; MSIE 5.5; Windows NT 5.1)",
-  },
+  special_excludes: [
+    "data:image/webp",
+    "data:image/",
+    "blog:",
+    "troubleshooting:",
+    "mailto:",
+  ],
+  checkOptions: { ...DEFAULT_CHECK_OPTIONS },
 };
 
 const DEFAULT_CONFIG = {
   jobs: [DEFAULT_JOB],
 };
 
+// NEU: loadConfig kann jetzt sowohl jobs[] als auch scanJobs verwenden
 async function loadConfig() {
   if (!CONFIG_PATH) {
     console.log(
       pc.yellow(
-        "⚠️  Keine hugo-broken-links.config.json gefunden – verwende Default-Konfiguration."
+        "⚠️  Keine hugo-broken-links-checker.config.json gefunden – verwende Default-Konfiguration."
       )
     );
     return DEFAULT_CONFIG;
@@ -96,16 +153,62 @@ async function loadConfig() {
     const raw = await fsp.readFile(CONFIG_PATH, "utf8");
     const parsed = JSON.parse(raw);
 
-    if (!parsed.jobs || !Array.isArray(parsed.jobs) || parsed.jobs.length === 0) {
-      console.log(
-        pc.yellow(
-          "⚠️  Konfigurationsdatei hat kein gültiges 'jobs'-Array – verwende Default-Job."
-        )
-      );
-      return DEFAULT_CONFIG;
+    // Fall 1: Altes Schema – jobs: [...]
+    if (parsed.jobs && Array.isArray(parsed.jobs) && parsed.jobs.length > 0) {
+      const jobs = parsed.jobs.map((j, idx) => ({
+        ...DEFAULT_JOB,
+        ...j,
+        name: j.name || `job-${idx + 1}`,
+        checkOptions: {
+          ...DEFAULT_CHECK_OPTIONS,
+          ...(j.checkOptions || {}),
+        },
+      }));
+      return { jobs };
     }
 
-    return parsed;
+    // Fall 2: Neues Schema – scanJobs + defaultJob
+    if (parsed.scanJobs && typeof parsed.scanJobs === "object") {
+      const jobs = [];
+      for (const [name, jobCfg] of Object.entries(parsed.scanJobs)) {
+        const job = {
+          ...DEFAULT_JOB,
+          ...jobCfg,
+          name,
+          checkOptions: {
+            ...DEFAULT_CHECK_OPTIONS,
+            ...(jobCfg.checkOptions || {}),
+          },
+          write_to_prefix: jobCfg.write_to_prefix || null,
+        };
+
+        // write_to aus Prefix + Mode bauen, falls kein explizites write_to da ist
+        if (!job.write_to && job.write_to_prefix) {
+          const modeSlug = (job.mode || "all").toLowerCase();
+          job.write_to = `${job.write_to_prefix}${modeSlug}.json`;
+        }
+
+        jobs.push(job);
+      }
+
+      if (!jobs.length) {
+        console.log(
+          pc.yellow(
+            "⚠️  scanJobs ist leer – verwende Default-Konfiguration."
+          )
+        );
+        return DEFAULT_CONFIG;
+      }
+
+      return { jobs };
+    }
+
+    console.log(
+      pc.yellow(
+        "⚠️  Konfigurationsdatei hat weder 'jobs' noch 'scanJobs' – verwende Default-Job."
+      )
+    );
+    return DEFAULT_CONFIG;
   } catch (e) {
     console.error(pc.red("❌ Fehler beim Lesen der Config-Datei:"), e.message);
     process.exit(1);
@@ -113,7 +216,7 @@ async function loadConfig() {
 }
 
 // ---------------------------------------------------------
-// Duration-Helfer
+// Duration-Helfer (wie früher)
 // ---------------------------------------------------------
 
 class Duration {
@@ -127,7 +230,7 @@ class Duration {
   }
 
   getDuration() {
-    // Ausgabe aktuell in Minuten
+    // Ausgabe aktuell in Minuten – wie im alten Skript
     return (performance.now() - this.beginTime) / 60000;
   }
 
@@ -137,7 +240,7 @@ class Duration {
 }
 
 // ---------------------------------------------------------
-// Datenstrukturen (Plain JS Objekte)
+// Datenstrukturen (entsprechend BLC_Scan_Summary)
 // ---------------------------------------------------------
 
 function createScanSummary(job) {
@@ -171,7 +274,7 @@ function createScanSummary(job) {
 // Helper: Logging Header / Footer
 // ---------------------------------------------------------
 
-function printHeader(config) {
+function printHeader({ jobs }) {
   console.log("\n" + "-".repeat(65));
   console.log(
     pc.bold(
@@ -185,7 +288,13 @@ function printHeader(config) {
   } else {
     console.log(`   Config:  ${pc.yellow("Default (keine Datei gefunden)")}`);
   }
-  console.log(`   Jobs:    ${pc.cyan(String(config.jobs.length))}`);
+  console.log(`   Jobs:    ${pc.cyan(String(jobs.length))}`);
+  if (SELECTED_JOB_NAME) {
+    console.log(`   Filter:  Job = ${pc.cyan(SELECTED_JOB_NAME)}`);
+  }
+  if (OVERRIDE_MODE) {
+    console.log(`   Mode-Override: ${pc.cyan(OVERRIDE_MODE)}`);
+  }
   if (DRY_RUN) {
     console.log(`   Mode:    ${pc.yellow("DRY-RUN (keine Schreibzugriffe)")}`);
   }
@@ -193,9 +302,13 @@ function printHeader(config) {
 }
 
 function printJobSummary(job, summary) {
+  const jobLabel = job.name
+    ? `${job.name} (${job.mode || "extern"})`
+    : job.mode || "extern";
+
   console.log(
     pc.bold(
-      `\n📋 Job: ${pc.cyan(job.mode || "extern")} – ${pc.green(job.scan_source)}`
+      `\n📋 Job: ${pc.cyan(jobLabel)} – ${pc.green(job.scan_source)}`
     )
   );
   console.log(
@@ -217,7 +330,7 @@ function printFooter() {
 }
 
 // ---------------------------------------------------------
-// Helper: Excludes
+// Helper: Excludes (wie isSpecialExclude in deinem alten Code)
 // ---------------------------------------------------------
 
 function isSpecialExclude(resultItem, job) {
@@ -227,7 +340,7 @@ function isSpecialExclude(resultItem, job) {
 
   for (const ex of job.special_excludes) {
     if (resultItem.url.startsWith(ex)) {
-      // Optional: auskommentieren falls zu noisy
+      // bei Bedarf wieder lauter machen:
       // console.log(pc.dim(`   ↳ Skip (special): ${resultItem.url}`));
       return true;
     }
@@ -236,44 +349,60 @@ function isSpecialExclude(resultItem, job) {
 }
 
 // ---------------------------------------------------------
-// Kernlogik pro Job
+// Kernlogik pro Job (entspricht run_job aus dem alten Skript)
 // ---------------------------------------------------------
 
 async function runJob(jobRaw) {
-  // Defaults + Job-Konfiguration mischen
+  // Defaults + Job-Konfiguration mischen (wie dice_parameters)
   const job = {
     ...DEFAULT_JOB,
     ...jobRaw,
     checkOptions: {
-      ...DEFAULT_JOB.checkOptions,
+      ...DEFAULT_CHECK_OPTIONS,
       ...(jobRaw.checkOptions || {}),
     },
   };
+
+  // ggf. Mode Override
+  if (OVERRIDE_MODE) {
+    job.mode = OVERRIDE_MODE;
+  }
+
+  // falls write_to_prefix gesetzt ist, write_to daraus ableiten
+  if (job.write_to_prefix) {
+    const modeSlug = (job.mode || "all").toLowerCase();
+    job.write_to = `${job.write_to_prefix}${modeSlug}.json`;
+  }
 
   const duration = new Duration();
   duration.start();
 
   const summary = createScanSummary(job);
-  summary.lastrun = format(new Date(), job.date_format || DEFAULT_JOB.date_format);
+  summary.lastrun = format(
+    new Date(),
+    job.date_format || DEFAULT_JOB.date_format
+  );
 
   const jsonArrayWrapper = [summary]; // Hugo mag Array
 
-  // ggf. Zielpfad-Verzeichnis anlegen
+  // Zielpfad-Verzeichnis anlegen
   const outPath = path.resolve(job.write_to);
   const outDir = path.dirname(outPath);
   await fsp.mkdir(outDir, { recursive: true });
 
-  // ggf. alte Datei löschen (nur wenn nicht dry-run)
+  // alte Datei löschen (wenn nicht dry-run)
   if (!DRY_RUN && fs.existsSync(outPath)) {
     await fsp.unlink(outPath);
   }
 
   const checker = new LinkChecker();
 
+  // pagestart-Event – wie früher
   checker.on("pagestart", (url) => {
     console.log(pc.blue(`🌐 Scanning page: ${url}`));
   });
 
+  // link-Event – entspricht deinem alten 'checker.on("link", ...)'
   checker.on("link", (result) => {
     summary.found += 1;
 
@@ -288,12 +417,13 @@ async function runJob(jobRaw) {
       parent: result.parent,
     };
 
+    // Special Excludes
     if (isSpecialExclude(resultItem, job)) {
       summary.dropped += 1;
       return;
     }
 
-    // Modus: intern / extern / all
+    // interne / externe / alle – exakt wie vorher:
     const isInternal = resultItem.url.startsWith(job.scan_source);
 
     if (job.mode === "intern") {
@@ -307,6 +437,7 @@ async function runJob(jobRaw) {
         return;
       }
     }
+    // "all" → nichts droppen
 
     // ab hier wird gezählt
     summary.total += 1;
@@ -325,14 +456,14 @@ async function runJob(jobRaw) {
     summary.runtime = duration.getDuration();
     summary.runtime_unit = duration.getDurationUnit();
 
-    // Zwischenstand schreiben (damit man während des Scans schon Daten hat)
+    // Zwischenstand schreiben (wie count_push_write)
     if (!DRY_RUN) {
       fs.writeFileSync(outPath, JSON.stringify(jsonArrayWrapper, null, 2), "utf8");
     }
   });
 
   // -------------------------------------------------------
-  // Scan starten
+  // Scan starten – wie "param.checkOptions.path = param.scan_source"
   // -------------------------------------------------------
   job.checkOptions.path = job.scan_source;
 
@@ -361,6 +492,7 @@ async function runJob(jobRaw) {
     )
   );
   console.log(`   Insgesamt geprüfte Links: ${result.links.length}`);
+
   const brokenLinksCount = result.links.filter((x) => x.state === "BROKEN");
   console.log(
     `   Davon broken: ${brokenLinksCount.length} (Details: ${path.relative(
@@ -378,11 +510,25 @@ async function runJob(jobRaw) {
 
 async function main() {
   const config = await loadConfig();
-  printHeader(config);
 
-  for (const job of config.jobs) {
-    // sequentiell, damit Ausgabe lesbarer bleibt
-    // (könnte man parallelisieren, braucht man hier aber nicht)
+  // ggf. nach Job-Name filtern
+  let jobs = config.jobs;
+  if (SELECTED_JOB_NAME) {
+    jobs = jobs.filter((j) => j.name === SELECTED_JOB_NAME);
+    if (jobs.length === 0) {
+      console.log(
+        pc.red(
+          `❌ Kein Job mit name="${SELECTED_JOB_NAME}" in Config gefunden.`
+        )
+      );
+      process.exit(1);
+    }
+  }
+
+  printHeader({ jobs });
+
+  for (const job of jobs) {
+    // sequentiell – Ausgabe lesbarer
     // eslint-disable-next-line no-await-in-loop
     await runJob(job);
   }

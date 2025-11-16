@@ -22,26 +22,29 @@ pnpm add -D hugo-broken-links-checker
 
 ### Setup
 
-Create a `hugo-broken-links.config.json` in the root folder of your project:
+Create a `hugo-broken-links-checker.config.json` in the root folder of your project:
 
 ```json
 {
-  "jobs": [
-    {
-      "scan_source": "http://localhost:1313/",
-      "write_to": "data/links_checked/external.json",
-      "date_format": "yyyy-MM-dd HH:mm:ss",
-      "mode": "extern",
+  "defaultJob": "carsten-local",
+  "scanJobs": {
+    "carsten-local": {
+      "scan_source": "http://192.168.178.91:81/",
+      "write_to_prefix": "data/links_checked/carsten-local-",
+      "mode": "all",
+      "date_format": "yyyy-MM-dd HH:mm:SSS",
       "special_excludes": [
         "data:image/webp",
-        "mailto:",
         "blog:",
-        "troubleshooting:"
+        "troubleshooting:",
+        "mailto:"
       ],
       "checkOptions": {
+        "path": "",
         "concurrency": 100,
         "recurse": true,
         "skip": "www.googleapis.com",
+        "format": "json",
         "silent": true,
         "verbosity": "error",
         "timeout": 0,
@@ -52,20 +55,8 @@ Create a `hugo-broken-links.config.json` in the root folder of your project:
         "retryErrorsJitter": 5,
         "userAgent": "Mozilla/4.0 (compatible; MSIE 6.0; MSIE 5.5; Windows NT 5.1)"
       }
-    },
-    {
-      "scan_source": "http://localhost:1313/",
-      "write_to": "data/links_checked/internal.json",
-      "date_format": "yyyy-MM-dd HH:mm:ss",
-      "mode": "intern",
-      "special_excludes": [
-        "data:image/webp",
-        "mailto:",
-        "blog:",
-        "troubleshooting:"
-      ]
     }
-  ]
+  }
 }
 ```
 
@@ -86,4 +77,5 @@ Dann in der package.json:
 npm run hugo:links
 # oder:
 npm run hugo:links -- --config my-links.config.json
+# doppeltes -- damit npm die Flags weiterreicht
 ```
