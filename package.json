@@ -1,0 +1,35 @@
+{
+    "name": "hugo-broken-links-checker",
+    "version": "1.0.0",
+    "type": "module",
+    "bin": {
+        "hugo-broken-links-checker": "./bin/hugo-broken-links-checker.mjs"
+    },
+    "scripts": {
+        "release:patch": "npm run build:noop && npm version patch && git push && git push --tags && npm publish --access public",
+        "release:minor": "npm run build:noop && npm version minor && git push && git push --tags && npm publish --access public",
+        "release:major": "npm run build:noop && npm version major && git push && git push --tags && npm publish --access public",
+        "build:noop": "echo \"nothing to build\""
+    },
+    "author": "Carsten Nichte",
+    "license": "GPL-3.0-or-later",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/cnichte/hugo-broken-links-checker.git"
+    },
+    "bugs": {
+        "url": "https://github.com/cnichte/hugo-broken-links-checker/issues"
+    },
+    "homepage": "https://github.com/cnichte/hugo-broken-links-checker#readme",
+    "keywords": [
+        "hugo",
+        "broken",
+        "check",
+        "links"
+    ],
+    "dependencies": {
+        "linkinator": "^4.0.0",
+        "date-fns": "^4.0.0",
+        "picocolors": "^1.0.0"
+    }
+}
