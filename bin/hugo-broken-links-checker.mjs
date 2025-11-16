@@ -43,7 +43,7 @@ for (let i = 0; i < ARGS.length; i += 1) {
 
 // Default-Konfig-Datei, falls nichts angegeben
 if (!CONFIG_PATH) {
-  const candidate = path.resolve("hugo-broken-links.config.json");
+  const candidate = path.resolve("hugo-broken-links-checker.config.json");
   if (fs.existsSync(candidate)) {
     CONFIG_PATH = candidate;
   }
