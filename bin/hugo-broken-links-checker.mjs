@@ -3,11 +3,11 @@
  * hugo-broken-links-checker
  *
  * Ist Teil der Hugo-Toolbox aber auch als eigenständiges CLI nutzbar.
- * 
+ *
  * - CLI-Wrapper rund um linkinator.
  * - Konfiguration über: hugo-broken-links-checker.config.json (oder Datei via --config)
  * - Unterstützt mehrere Jobs
- * - Läuft idealerweise gegen `hugo server` zB. http://localhost:1313/ 
+ * - Läuft idealerweise gegen `hugo server` zB. http://localhost:1313/
  * - Mode: "intern" | "extern" | "all"
  *
  * @author Carsten Nichte, 2025
@@ -24,6 +24,16 @@ import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
+
+let LIVE_STATS = {
+  pages: 0,
+  ok: 0,
+  broken: 0,
+  skipped: 0,
+  total: 0,
+  currentPage: "",
+  currentLink: "",
+};
 
 // ---------------------------------------------------------
 // CLI-Argumente
@@ -104,7 +114,7 @@ const DEFAULT_CHECK_OPTIONS = {
   format: "json",
   silent: true,
   verbosity: "error",
-  timeout: 0,
+  timeout: 15000, // default 15s to prevent hanging on dead sockets
   // markdown: true,
   // serverRoot: './',
   directoryListing: true,
@@ -193,9 +203,7 @@ async function loadConfig() {
 
       if (!jobs.length) {
         console.log(
-          pc.yellow(
-            "⚠️  scanJobs ist leer – verwende Default-Konfiguration."
-          )
+          pc.yellow("⚠️  scanJobs ist leer – verwende Default-Konfiguration.")
         );
         return DEFAULT_CONFIG;
       }
@@ -271,6 +279,30 @@ function createScanSummary(job) {
 }
 
 // ---------------------------------------------------------
+// Helper: Live-Stats Rendering (2-Zeilen-Output)
+// ---------------------------------------------------------
+
+function renderLiveStats(initial = false) {
+  if (!initial) {
+    // Cursor 3 Zeilen hoch + clear
+    process.stdout.write("\x1b[3A\x1b[0J");
+  }
+
+  // Zeile 1 – Current page
+  console.log(pc.blue(`🌐 Scanning page: ${LIVE_STATS.currentPage || "-"}`));
+
+  // Zeile 2 – Latest link
+  console.log(pc.gray(`   Latest link: ${LIVE_STATS.currentLink || "-"}`));
+
+  // Zeile 3 – Stats
+  console.log(
+    pc.dim(
+      `   Pages: ${LIVE_STATS.pages} Ok: ${LIVE_STATS.ok} Broken: ${LIVE_STATS.broken} Skipped: ${LIVE_STATS.skipped} Total: ${LIVE_STATS.total}`
+    )
+  );
+}
+
+// ---------------------------------------------------------
 // Helper: Logging Header / Footer
 // ---------------------------------------------------------
 
@@ -307,9 +339,7 @@ function printJobSummary(job, summary) {
     : job.mode || "extern";
 
   console.log(
-    pc.bold(
-      `\n📋 Job: ${pc.cyan(jobLabel)} – ${pc.green(job.scan_source)}`
-    )
+    pc.bold(`\n📋 Job: ${pc.cyan(jobLabel)} – ${pc.green(job.scan_source)}`)
   );
   console.log(
     `   Laufzeit:   ${summary.runtime.toFixed(2)} ${summary.runtime_unit}`
@@ -353,6 +383,16 @@ function isSpecialExclude(resultItem, job) {
 // ---------------------------------------------------------
 
 async function runJob(jobRaw) {
+  // pro Job Live-Stats zurücksetzen
+  LIVE_STATS = {
+    pages: 0,
+    ok: 0,
+    broken: 0,
+    skipped: 0,
+    total: 0,
+    currentPage: "",
+  };
+
   // Defaults + Job-Konfiguration mischen (wie dice_parameters)
   const job = {
     ...DEFAULT_JOB,
@@ -397,23 +437,41 @@ async function runJob(jobRaw) {
 
   const checker = new LinkChecker();
 
-  // pagestart-Event – wie früher
+  // pagestart-Event
   checker.on("pagestart", (url) => {
-    console.log(pc.blue(`🌐 Scanning page: ${url}`));
+    LIVE_STATS.pages += 1;
+    LIVE_STATS.currentPage = url;
+
+    // erste Seite: keine Cursor-Steuerung, einfach normal ausgeben
+    const initial = LIVE_STATS.pages === 1;
+    renderLiveStats(initial);
   });
 
   // link-Event – entspricht deinem alten 'checker.on("link", ...)'
   checker.on("link", (result) => {
     summary.found += 1;
 
+    // Live-Statistik updaten (global)
+    LIVE_STATS.total += 1;
+    if (result.state === "OK") {
+      LIVE_STATS.ok += 1;
+    } else if (result.state === "BROKEN") {
+      LIVE_STATS.broken += 1;
+    } else if (result.state === "SKIPPED") {
+      LIVE_STATS.skipped += 1;
+    }
+
+    // Anzeige aktualisieren (immer 2 Zeilen überschreiben)
+    // Nicht bei JEDEM Link neu zeichnen, sondern z.B. alle 50 Links
+    if (LIVE_STATS.pages > 0 && LIVE_STATS.total % 50 === 0) {
+      renderLiveStats(false);
+    }
+
     const resultItem = {
       url: result.url,
       state: result.state,
       status: result.status,
-      scantime: format(
-        new Date(),
-        job.date_format || DEFAULT_JOB.date_format
-      ),
+      scantime: format(new Date(), job.date_format || DEFAULT_JOB.date_format),
       parent: result.parent,
     };
 
@@ -458,7 +516,11 @@ async function runJob(jobRaw) {
 
     // Zwischenstand schreiben (wie count_push_write)
     if (!DRY_RUN) {
-      fs.writeFileSync(outPath, JSON.stringify(jsonArrayWrapper, null, 2), "utf8");
+      fs.writeFileSync(
+        outPath,
+        JSON.stringify(jsonArrayWrapper, null, 2),
+        "utf8"
+      );
     }
   });
 
@@ -481,8 +543,15 @@ async function runJob(jobRaw) {
   summary.finished = true;
 
   if (!DRY_RUN) {
-    fs.writeFileSync(outPath, JSON.stringify(jsonArrayWrapper, null, 2), "utf8");
+    fs.writeFileSync(
+      outPath,
+      JSON.stringify(jsonArrayWrapper, null, 2),
+      "utf8"
+    );
   }
+
+  // Kleine optische Trennung nach dem Live-Stat-Block
+  process.stdout.write("\n");
 
   console.log(
     pc.cyan(
